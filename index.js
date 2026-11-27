@@ -208,7 +208,7 @@ async function createImage(track) {
 
       <text x="140" y="48"
             fill="#ffffff"
-            font-family="Arial, sans-serif"
+            font-family="DejaVu Sans"
             font-size="18"
             font-weight="bold">
         ${name}
@@ -216,7 +216,7 @@ async function createImage(track) {
 
       <text x="140" y="74"
             fill="#b3b3b3"
-            font-family="Arial, sans-serif"
+            font-family="DejaVu Sans"
             font-size="14">
         ${artists}
       </text>
@@ -235,7 +235,7 @@ async function createImage(track) {
 
       <text x="140" y="120"
             fill="#777777"
-            font-family="Arial, sans-serif"
+            font-family="DejaVu Sans"
             font-size="10"
             letter-spacing="1">
         SPOTIFY NOW PLAYING
