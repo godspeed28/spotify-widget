@@ -331,6 +331,48 @@ const THEMES = {
   },
 };
 
+// ==========================================
+// LIVE ELAPSED TIME
+// ==========================================
+// Tiap digit adalah gulungan angka yang bergeser otomatis (SMIL),
+// jadi waktu berjalan sendiri tanpa JavaScript. Offset negatif pada
+// `begin` membuat animasi langsung mulai dari posisi lagu saat ini.
+
+function liveElapsed({ x, y, progressMs, durationMs, font, color }) {
+  const progressSec = progressMs / 1000;
+  const remaining = Math.max((durationMs - progressMs) / 1000, 0);
+  const ROW = 14;
+
+  const roll = (cx, count, stepSec, offsetSec) => {
+    const cycle = count * stepSec;
+    const values = Array.from({ length: count }, (_, i) => `0 ${-i * ROW}`).join(";");
+    const keyTimes = Array.from({ length: count }, (_, i) => (i / count).toFixed(4)).join(";");
+    const digits = Array.from(
+      { length: count },
+      (_, i) => `<text x="0" y="${i * ROW}" text-anchor="middle">${i}</text>`
+    ).join("");
+
+    return `
+      <g transform="translate(${cx.toFixed(1)},${y})" clip-path="url(#dig)">
+        <g>
+          ${digits}
+          <animateTransform attributeName="transform" type="translate"
+            calcMode="discrete" values="${values}" keyTimes="${keyTimes}"
+            dur="${cycle}s" begin="-${offsetSec.toFixed(3)}s"
+            repeatDur="${(remaining + offsetSec).toFixed(3)}s" fill="freeze"/>
+        </g>
+      </g>`;
+  };
+
+  return `
+    <g font-family="${font}" font-size="11" fill="${color}">
+      ${roll(x + 3, 10, 60, progressSec % 600)}
+      <text x="${x + 7.2}" y="${y}" text-anchor="middle">:</text>
+      ${roll(x + 12, 6, 10, progressSec % 60)}
+      ${roll(x + 18.3, 10, 1, progressSec % 10)}
+    </g>`;
+}
+
 async function createSVG({
   track = null,
   state = "idle",
@@ -452,16 +494,36 @@ async function createSVG({
   // ---- Baris bawah ----
   let footer = "";
   if (showBar) {
+    const remaining = Math.max((duration - progress) / 1000, 0);
+    const live = playing && remaining > 0;
+    const liveTime = live && duration < 600000;
+
+    const barAnim = live
+      ? `<animate attributeName="width" from="${fill.toFixed(1)}" to="${barW}"
+           dur="${remaining.toFixed(3)}s" fill="freeze"/>`
+      : "";
+    const knobAnim = live
+      ? `<animate attributeName="cx" from="${(barX + fill).toFixed(1)}" to="${barX + barW}"
+           dur="${remaining.toFixed(3)}s" fill="freeze"/>`
+      : "";
+
+    const elapsed = liveTime
+      ? liveElapsed({
+          x: barX,
+          y: 132,
+          progressMs: progress,
+          durationMs: duration,
+          font: FONT,
+          color: t.dim,
+        })
+      : `<text x="${barX}" y="132" fill="${t.dim}" font-family="${FONT}" font-size="11">${fmtTime(progress)}</text>`;
+
     footer = `
     <rect x="${barX}" y="108" width="${barW}" height="4" rx="2"
           fill="${t.trackBg}" fill-opacity="${t.trackBgOpacity}"/>
-    ${
-      fill > 0
-        ? `<rect x="${barX}" y="108" width="${fill.toFixed(1)}" height="4" rx="2" fill="url(#bar)"/>
-           <circle cx="${(barX + fill).toFixed(1)}" cy="110" r="5" fill="${t.knob}"/>`
-        : ""
-    }
-    <text x="${barX}" y="132" fill="${t.dim}" font-family="${FONT}" font-size="11">${fmtTime(progress)}</text>
+    <rect x="${barX}" y="108" width="${fill.toFixed(1)}" height="4" rx="2" fill="url(#bar)">${barAnim}</rect>
+    <circle cx="${(barX + fill).toFixed(1)}" cy="110" r="5" fill="${t.knob}">${knobAnim}</circle>
+    ${elapsed}
     <text x="${barX + barW}" y="132" fill="${t.dim}" text-anchor="end" font-family="${FONT}" font-size="11">${fmtTime(duration)}</text>`;
   } else if (state === "last" && playedAt) {
     footer = `
@@ -517,6 +579,7 @@ async function createSVG({
     <clipPath id="card"><rect width="${W}" height="${H}" rx="18"/></clipPath>
     <clipPath id="sleeve"><rect x="18" y="19" width="112" height="112" rx="10"/></clipPath>
     <clipPath id="label"><circle cx="150" cy="75" r="20"/></clipPath>
+    <clipPath id="dig"><rect x="-5" y="-11" width="10" height="14"/></clipPath>
     <clipPath id="txt"><rect x="${barX}" y="50" width="${barW}" height="34"/></clipPath>
 
     <filter id="blur" x="-20%" y="-20%" width="140%" height="140%">
@@ -630,7 +693,7 @@ app.get("/now-playing", async (req, res) => {
     res.setHeader("Content-Type", "image/svg+xml; charset=utf-8");
     res.setHeader(
       "Cache-Control",
-      "public, max-age=0, s-maxage=30, stale-while-revalidate=15"
+      "public, max-age=0, s-maxage=10, stale-while-revalidate=5"
     );
 
     return res.status(200).send(svg);
