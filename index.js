@@ -349,39 +349,75 @@ async function getLyrics(track) {
   return lines;
 }
 
-// Tiap baris muncul/hilang sesuai waktunya lewat <set> (SMIL)
-function lyricLines({ x, y, lines, progressMs, playing, font, color }) {
-  // Cari baris yang sedang dinyanyikan
+// ------------------------------------------
+// Tampilan lirik gaya karaoke 3 baris
+// ------------------------------------------
+// Tiap baris punya "slot" posisi: above (tersembunyi), prev (redup),
+// cur (besar & terang), next (setengah redup), below (tersembunyi).
+// Saat baris berganti, teks berpindah slot dengan animasi SMIL halus.
+
+const LY = {
+  above: { y: 160, size: 12,   op: 0 },
+  prev:  { y: 177, size: 12.5, op: 0.38 },
+  cur:   { y: 204, size: 16,   op: 1 },
+  next:  { y: 225, size: 13,   op: 0.55 },
+  below: { y: 244, size: 12,   op: 0 },
+};
+
+const lyState = (d) =>
+  d <= -2 ? LY.above : d === -1 ? LY.prev : d === 0 ? LY.cur : d === 1 ? LY.next : LY.below;
+
+const lyAnim = (attr, from, to, begin) =>
+  `<animate attributeName="${attr}" from="${from}" to="${to}" begin="${begin}s"
+     dur="0.4s" fill="freeze" calcMode="spline" keyTimes="0;1" keySplines="0.4 0 0.2 1"/>`;
+
+function lyricLines({ x, lines, progressMs, playing, font, color }) {
+  // Baris yang sedang dinyanyikan
   let cur = -1;
   for (let i = 0; i < lines.length; i++) {
     if (lines[i].t <= progressMs) cur = i;
     else break;
   }
 
-  // Paused: tampilkan baris saat ini saja (statis)
+  const label = (i, max) => esc(trunc(lines[i].text || "♪", max));
+  const out = [];
+
+  // Paused: tampilkan 3 baris statis
   if (!playing) {
-    if (cur < 0 || !lines[cur].text) return "";
-    return `<text x="${x}" y="${y}" text-anchor="middle" font-family="${font}" font-size="13"
-             fill="${color}">${esc(trunc(lines[cur].text, 60))}</text>`;
+    for (let i = Math.max(cur - 1, 0); i <= Math.min(cur + 1, lines.length - 1); i++) {
+      const s = lyState(i - cur);
+      out.push(
+        `<text x="${x}" y="${s.y}" text-anchor="middle" font-family="${font}"
+           font-size="${s.size}" font-weight="600" fill="${color}"
+           fill-opacity="${s.op}">${label(i, i === cur ? 50 : 56)}</text>`
+      );
+    }
+    return out.join("");
   }
 
-  const out = [];
-  const first = Math.max(cur, 0);
-  const last = Math.min(lines.length, first + 16);
+  // Playing: tiap baris punya animasi perpindahan slot
+  const first = Math.max(cur - 1, 0);
+  const last = Math.min(lines.length, cur + 16);
 
   for (let i = first; i < last; i++) {
-    const text = lines[i].text;
-    if (!text) continue;
+    const s0 = lyState(i - cur);
+    let anims = "";
 
-    const start = Math.max((lines[i].t - progressMs) / 1000, 0);
-    const end = lines[i + 1] ? (lines[i + 1].t - progressMs) / 1000 : null;
-    if (end !== null && end <= 0) continue;
+    // Baris i berpindah slot tiap kali baris ke-k mulai dinyanyikan
+    for (let k = Math.max(cur + 1, i - 1); k <= i + 2 && k < lines.length; k++) {
+      const a = lyState(i - (k - 1));
+      const b = lyState(i - k);
+      const begin = Math.max((lines[k].t - progressMs) / 1000, 0.01).toFixed(2);
+      anims +=
+        lyAnim("y", a.y, b.y, begin) +
+        lyAnim("font-size", a.size, b.size, begin) +
+        lyAnim("fill-opacity", a.op, b.op, begin);
+    }
 
     out.push(
-      `<text x="${x}" y="${y}" text-anchor="middle" font-family="${font}" font-size="13"
-             fill="${color}" visibility="hidden">${esc(trunc(text, 60))}<set attributeName="visibility" to="visible" begin="${start.toFixed(
-        2
-      )}s"${end !== null ? ` end="${end.toFixed(2)}s"` : ""}/></text>`
+      `<text x="${x}" y="${s0.y}" text-anchor="middle" font-family="${font}"
+         font-size="${s0.size}" font-weight="600" fill="${color}"
+         fill-opacity="${s0.op}">${label(i, 50)}${anims}</text>`
     );
   }
 
@@ -476,7 +512,7 @@ async function createSVG({
 } = {}) {
   const W = 520;
   const showLyrics = !!lyrics && (state === "playing" || state === "paused");
-  const H = showLyrics ? 182 : 150; // kartu lebih tinggi kalau ada lirik
+  const H = showLyrics ? 236 : 150; // kartu lebih tinggi kalau ada lirik
   const t = THEMES[theme] || THEMES.dark;
 
   const hasTrack = !!track && ["playing", "paused", "last"].includes(state);
@@ -626,18 +662,20 @@ async function createSVG({
     )}</text>`;
   }
 
-  // ---- Lirik ----
+  // ---- Lirik (karaoke 3 baris) ----
   const lyricsSvg = showLyrics
-    ? `<line x1="18" y1="148" x2="${W - 18}" y2="148" stroke="${t.edge}" stroke-opacity="0.1"/>` +
-      lyricLines({
-        x: W / 2,
-        y: 170,
-        lines: lyrics,
-        progressMs: progress,
-        playing,
-        font: FONT,
-        color: t.main,
-      })
+    ? `<rect x="0" y="150" width="${W}" height="${H - 150}" fill="${t.edge}" fill-opacity="0.04"/>
+       <line x1="18" y1="150" x2="${W - 18}" y2="150" stroke="${t.edge}" stroke-opacity="0.1"/>
+       <g mask="url(#lyfade)">
+         ${lyricLines({
+           x: W / 2,
+           lines: lyrics,
+           progressMs: progress,
+           playing,
+           font: FONT,
+           color: t.main,
+         })}
+       </g>`
     : "";
 
   const [s0, s1, s2] = t.shadeOpacity;
@@ -697,6 +735,17 @@ async function createSVG({
     <filter id="shadow" x="-30%" y="-30%" width="160%" height="170%">
       <feDropShadow dx="0" dy="6" stdDeviation="7" flood-color="#000" flood-opacity="0.55"/>
     </filter>
+
+    <!-- Fade atas & bawah untuk area lirik -->
+    <linearGradient id="lyg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity="0"/>
+      <stop offset="0.2" stop-color="#fff"/>
+      <stop offset="0.85" stop-color="#fff"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    <mask id="lyfade" maskUnits="userSpaceOnUse" x="0" y="152" width="${W}" height="${H - 152}">
+      <rect x="0" y="152" width="${W}" height="${H - 152}" fill="url(#lyg)"/>
+    </mask>
   </defs>
 
   <g clip-path="url(#card)">
