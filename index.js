@@ -1,23 +1,21 @@
 
 const express = require("express");
-const sharp = require("sharp");
-
 const app = express();
 
-// ========================================
-// SPOTIFY CONFIGURATION
-// ========================================
+// ==========================================
+// SPOTIFY ENVIRONMENT VARIABLES
+// ==========================================
 
 const CLIENT_ID = process.env.SPOTIFY_CLIENT_ID;
 const CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET;
 const REFRESH_TOKEN = process.env.SPOTIFY_REFRESH_TOKEN;
 
+// ==========================================
+// ACCESS TOKEN CACHE
+// ==========================================
+
 let cachedToken = null;
 let tokenExpiry = 0;
-
-// ========================================
-// GET SPOTIFY ACCESS TOKEN
-// ========================================
 
 async function getAccessToken() {
   if (cachedToken && Date.now() < tokenExpiry - 60000) {
@@ -62,9 +60,9 @@ async function getAccessToken() {
   return cachedToken;
 }
 
-// ========================================
+// ==========================================
 // ESCAPE XML
-// ========================================
+// ==========================================
 
 function esc(value) {
   return String(value ?? "")
@@ -75,20 +73,20 @@ function esc(value) {
     .replace(/'/g, "&apos;");
 }
 
-// ========================================
-// CREATE NOW PLAYING IMAGE
-// ========================================
+// ==========================================
+// CREATE SVG
+// ==========================================
 
-async function createImage(track) {
+async function createSVG(track) {
   const width = 480;
   const height = 140;
 
   const bg = "#121212";
   const accent = "#1DB954";
 
-  // Jika tidak ada lagu yang diputar
+  // No music playing
   if (!track) {
-    const svg = `
+    return `
       <svg xmlns="http://www.w3.org/2000/svg"
            width="${width}"
            height="${height}"
@@ -100,7 +98,7 @@ async function createImage(track) {
         <text x="240" y="65"
               text-anchor="middle"
               fill="#ffffff"
-              font-family="Arial"
+              font-family="Arial, sans-serif"
               font-size="18"
               font-weight="bold">
           Nothing Playing
@@ -109,17 +107,19 @@ async function createImage(track) {
         <text x="240" y="90"
               text-anchor="middle"
               fill="#b3b3b3"
-              font-family="Arial"
+              font-family="Arial, sans-serif"
               font-size="13">
           Play something on Spotify
         </text>
+
       </svg>
     `;
-
-    return sharp(Buffer.from(svg)).png().toBuffer();
   }
 
-  // Informasi lagu
+  // ========================================
+  // TRACK INFORMATION
+  // ========================================
+
   const name = esc(track.name).slice(0, 38);
 
   const artists = esc(
@@ -145,7 +145,7 @@ async function createImage(track) {
   // DOWNLOAD ALBUM COVER
   // ========================================
 
-  let coverBuffer = null;
+  let coverImage = "";
 
   const coverUrl = track.album?.images?.[0]?.url;
 
@@ -154,121 +154,133 @@ async function createImage(track) {
       const coverResponse = await fetch(coverUrl);
 
       if (!coverResponse.ok) {
-        throw new Error("Cover album gagal diunduh.");
+        throw new Error("Gagal mengambil cover album.");
       }
 
       const contentType =
         coverResponse.headers.get("content-type") || "";
 
-      if (!contentType.startsWith("image/")) {
-        throw new Error("Format cover album tidak valid.");
+      if (!/^image\/(jpeg|png|webp|gif)$/i.test(contentType)) {
+        throw new Error("Format gambar tidak didukung.");
       }
 
       const imageBuffer = Buffer.from(
         await coverResponse.arrayBuffer()
       );
 
-      if (imageBuffer.length > 5 * 1024 * 1024) {
-        throw new Error("Ukuran cover album terlalu besar.");
+      // Maksimum ukuran cover 2 MB
+      if (imageBuffer.length > 2 * 1024 * 1024) {
+        throw new Error("Ukuran cover terlalu besar.");
       }
 
-      coverBuffer = await sharp(imageBuffer)
-        .resize(108, 108, {
-          fit: "cover",
-          position: "centre",
-        })
-        .png()
-        .toBuffer();
+      const mimeType = contentType.split(";")[0];
+
+      coverImage =
+        `data:${mimeType};base64,${imageBuffer.toString("base64")}`;
 
     } catch (error) {
-      console.error("Cover Error:", error.message);
+      console.error("Album Cover Error:", error.message);
     }
   }
 
   // ========================================
-  // CREATE SVG LAYOUT
+  // SVG LAYOUT
   // ========================================
 
-  const svg = `
+  return `
     <svg xmlns="http://www.w3.org/2000/svg"
+         xmlns:xlink="http://www.w3.org/1999/xlink"
          width="${width}"
          height="${height}"
          viewBox="0 0 ${width} ${height}">
 
-      <rect width="100%" height="100%"
-            rx="12" fill="${bg}"/>
+      <!-- Background -->
+      <rect width="100%"
+            height="100%"
+            rx="12"
+            fill="${bg}"/>
 
+      <!-- Album Cover -->
       ${
-        !coverBuffer
-          ? `<rect x="16" y="16"
-                  width="108" height="108"
-                  rx="8" fill="#282828"/>`
-          : ""
+        coverImage
+          ? `
+            <image
+              x="16"
+              y="16"
+              width="108"
+              height="108"
+              href="${coverImage}"
+              xlink:href="${coverImage}"
+              preserveAspectRatio="xMidYMid slice"/>
+          `
+          : `
+            <rect x="16"
+                  y="16"
+                  width="108"
+                  height="108"
+                  rx="8"
+                  fill="#282828"/>
+          `
       }
 
-      <text x="140" y="48"
+      <!-- Track Name -->
+      <text x="140"
+            y="48"
             fill="#ffffff"
-            font-family="DejaVu Sans"
+            font-family="Arial, sans-serif"
             font-size="18"
             font-weight="bold">
         ${name}
       </text>
 
-      <text x="140" y="74"
+      <!-- Artist Name -->
+      <text x="140"
+            y="74"
             fill="#b3b3b3"
-            font-family="DejaVu Sans"
+            font-family="Arial, sans-serif"
             font-size="14">
         ${artists}
       </text>
 
-      <rect x="140" y="94"
+      <!-- Progress Background -->
+      <rect x="140"
+            y="94"
             width="${trackWidth}"
             height="5"
             rx="2.5"
             fill="#333333"/>
 
-      <rect x="140" y="94"
+      <!-- Progress Bar -->
+      <rect x="140"
+            y="94"
             width="${barWidth}"
             height="5"
             rx="2.5"
             fill="${accent}"/>
 
-      <text x="140" y="120"
+      <!-- Footer -->
+      <text x="140"
+            y="120"
             fill="#777777"
-            font-family="DejaVu Sans"
+            font-family="Arial, sans-serif"
             font-size="10"
             letter-spacing="1">
         SPOTIFY NOW PLAYING
       </text>
 
-      <circle cx="450" cy="115"
-              r="5" fill="${accent}"/>
+      <!-- Spotify Indicator -->
+      <circle cx="450"
+              cy="115"
+              r="5"
+              fill="${accent}"/>
 
     </svg>
   `;
-
-  // ========================================
-  // COMBINE COVER + SVG INTO PNG
-  // ========================================
-
-  let image = sharp(Buffer.from(svg));
-
-  if (coverBuffer) {
-    image = image.composite([
-      {
-        input: coverBuffer,
-        left: 16,
-        top: 16,
-      },
-    ]);
-  }
-
-  return image.png().toBuffer();
 }
 
-// ========================================
-// NOW PLAYING ENDPOINT
-// ========================================
+// ==========================================
+// NOW PLAYING ROUTE
+// ==========================================
 
 app.get("/now-playing", async (req, res) => {
   try {
@@ -283,62 +295,67 @@ app.get("/now-playing", async (req, res) => {
       }
     );
 
-    let image;
+    let svg;
 
     if (response.status === 204) {
-      image = await createImage(null);
+      svg = await createSVG(null);
+
     } else if (!response.ok) {
       throw new Error(
         `Spotify API Error: ${response.status}`
       );
+
     } else {
       const data = await response.json();
 
-      image = data.is_playing && data.item
-        ? await createImage({
-            ...data.item,
-            progress_ms: data.progress_ms,
-          })
-        : await createImage(null);
+      if (data.is_playing && data.item) {
+        svg = await createSVG({
+          ...data.item,
+          progress_ms: data.progress_ms,
+        });
+      } else {
+        svg = await createSVG(null);
+      }
     }
 
-    res.setHeader("Content-Type", "image/png");
+    res.setHeader(
+      "Content-Type",
+      "image/svg+xml; charset=utf-8"
+    );
 
     res.setHeader(
       "Cache-Control",
       "public, max-age=0, s-maxage=30, stale-while-revalidate=15"
     );
 
-    return res.status(200).send(image);
+    return res.status(200).send(svg);
 
   } catch (error) {
-    console.error("Now Playing Error:", error);
+    console.error("Spotify Now Playing Error:", error);
 
-    try {
-      const fallback = await createImage(null);
+    res.setHeader(
+      "Content-Type",
+      "image/svg+xml; charset=utf-8"
+    );
 
-      res.setHeader("Content-Type", "image/png");
-      res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Cache-Control", "no-cache");
 
-      return res.status(200).send(fallback);
-
-    } catch (imageError) {
-      console.error("Image Error:", imageError);
-      return res.status(500).send("Internal Server Error");
-    }
+    return res.status(500).send(
+      await createSVG(null)
+    );
   }
 });
 
-// ========================================
+// ==========================================
 // HOME ROUTE
-// ========================================
+// ==========================================
 
 app.get("/", (req, res) => {
   res.redirect("/now-playing");
 });
 
-// ========================================
-// EXPORT
-// ========================================
+// ==========================================
+// EXPORT APP FOR VERCEL
+// ==========================================
 
 module.exports = app;
