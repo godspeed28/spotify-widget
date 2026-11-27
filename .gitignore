@@ -1,0 +1,6 @@
+node_modules/
+.env
+.env.local
+.vercel
+get-token.js
+*.log
