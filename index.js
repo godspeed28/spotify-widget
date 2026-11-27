@@ -297,6 +297,98 @@ async function getNowPlaying() {
 }
 
 // ==========================================
+// LYRICS (LRCLIB)
+// ==========================================
+// LRCLIB: database lirik komunitas, gratis, tanpa API key.
+// Format LRC: "[mm:ss.xx] teks baris"
+
+const lyricsCache = new Map();
+const LYRICS_CACHE_MAX = 50;
+
+function parseLrc(lrc) {
+  if (!lrc) return null;
+  const out = [];
+  for (const raw of lrc.split("\n")) {
+    const m = raw.match(/^\[(\d+):(\d+(?:\.\d+)?)\]\s*(.*)$/);
+    if (!m) continue;
+    out.push({
+      t: (Number(m[1]) * 60 + parseFloat(m[2])) * 1000,
+      text: m[3].trim(),
+    });
+  }
+  return out.length ? out : null;
+}
+
+async function getLyrics(track) {
+  if (!track?.id || track.type === "episode") return null;
+  if (lyricsCache.has(track.id)) return lyricsCache.get(track.id);
+
+  let lines = null;
+  try {
+    const params = new URLSearchParams({
+      track_name: track.name,
+      artist_name: track.artists?.[0]?.name || "",
+      album_name: track.album?.name || "",
+      duration: String(Math.round((track.duration_ms || 0) / 1000)),
+    });
+
+    const res = await fetch(`https://lrclib.net/api/get?${params}`, {
+      headers: { "User-Agent": "spotify-now-playing-card" },
+      signal: AbortSignal.timeout(3000),
+    });
+
+    if (res.ok) lines = parseLrc((await res.json()).syncedLyrics);
+  } catch (error) {
+    console.error("Lyrics Error:", error.message);
+  }
+
+  if (lyricsCache.size >= LYRICS_CACHE_MAX) {
+    lyricsCache.delete(lyricsCache.keys().next().value);
+  }
+  lyricsCache.set(track.id, lines);
+  return lines;
+}
+
+// Tiap baris muncul/hilang sesuai waktunya lewat <set> (SMIL)
+function lyricLines({ x, y, lines, progressMs, playing, font, color }) {
+  // Cari baris yang sedang dinyanyikan
+  let cur = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].t <= progressMs) cur = i;
+    else break;
+  }
+
+  // Paused: tampilkan baris saat ini saja (statis)
+  if (!playing) {
+    if (cur < 0 || !lines[cur].text) return "";
+    return `<text x="${x}" y="${y}" text-anchor="middle" font-family="${font}" font-size="13"
+             fill="${color}">${esc(trunc(lines[cur].text, 60))}</text>`;
+  }
+
+  const out = [];
+  const first = Math.max(cur, 0);
+  const last = Math.min(lines.length, first + 16);
+
+  for (let i = first; i < last; i++) {
+    const text = lines[i].text;
+    if (!text) continue;
+
+    const start = Math.max((lines[i].t - progressMs) / 1000, 0);
+    const end = lines[i + 1] ? (lines[i + 1].t - progressMs) / 1000 : null;
+    if (end !== null && end <= 0) continue;
+
+    out.push(
+      `<text x="${x}" y="${y}" text-anchor="middle" font-family="${font}" font-size="13"
+             fill="${color}" visibility="hidden">${esc(trunc(text, 60))}<set attributeName="visibility" to="visible" begin="${start.toFixed(
+        2
+      )}s"${end !== null ? ` end="${end.toFixed(2)}s"` : ""}/></text>`
+    );
+  }
+
+  return out.join("");
+}
+
+// ==========================================
 // CREATE SVG
 // ==========================================
 
@@ -380,9 +472,11 @@ async function createSVG({
   theme = "dark",
   accentOverride = null,
   spin = true,
+  lyrics = null,
 } = {}) {
   const W = 520;
-  const H = 150;
+  const showLyrics = !!lyrics && (state === "playing" || state === "paused");
+  const H = showLyrics ? 182 : 150; // kartu lebih tinggi kalau ada lirik
   const t = THEMES[theme] || THEMES.dark;
 
   const hasTrack = !!track && ["playing", "paused", "last"].includes(state);
@@ -532,6 +626,20 @@ async function createSVG({
     )}</text>`;
   }
 
+  // ---- Lirik ----
+  const lyricsSvg = showLyrics
+    ? `<line x1="18" y1="148" x2="${W - 18}" y2="148" stroke="${t.edge}" stroke-opacity="0.1"/>` +
+      lyricLines({
+        x: W / 2,
+        y: 170,
+        lines: lyrics,
+        progressMs: progress,
+        playing,
+        font: FONT,
+        color: t.main,
+      })
+    : "";
+
   const [s0, s1, s2] = t.shadeOpacity;
 
   const a11y = hasTrack
@@ -654,6 +762,9 @@ async function createSVG({
           font-family="${FONT}" font-size="14">${esc(subtitle)}</text>
 
     ${footer}
+
+    <!-- Lirik -->
+    ${lyricsSvg}
   </g>
 
   <!-- Garis tepi kartu -->
@@ -669,6 +780,7 @@ async function createSVG({
 //   ?theme=light        tema terang (default: dark)
 //   ?accent=ff5500      paksa warna aksen (hex 6 digit, tanpa #)
 //   ?spin=off           piringan tidak berputar
+//   ?lyrics=on          tampilkan lirik synced (LRCLIB)
 
 function readOptions(req) {
   const accent = String(req.query.accent || "");
@@ -676,6 +788,7 @@ function readOptions(req) {
     theme: req.query.theme === "light" ? "light" : "dark",
     accentOverride: /^[0-9a-f]{6}$/i.test(accent) ? `#${accent}` : null,
     spin: req.query.spin !== "off",
+    wantLyrics: req.query.lyrics === "on",
   };
 }
 
@@ -684,11 +797,17 @@ function readOptions(req) {
 // ==========================================
 
 app.get("/now-playing", async (req, res) => {
-  const options = readOptions(req);
+  const { wantLyrics, ...options } = readOptions(req);
 
   try {
     const np = await getNowPlaying();
-    const svg = await createSVG({ ...np, ...options });
+
+    const lyrics =
+      wantLyrics && (np.state === "playing" || np.state === "paused")
+        ? await getLyrics(np.track)
+        : null;
+
+    const svg = await createSVG({ ...np, ...options, lyrics });
 
     res.setHeader("Content-Type", "image/svg+xml; charset=utf-8");
     res.setHeader(
